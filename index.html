@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Security System Canvas</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- MediaPipe libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .video-container {
+            transform: scaleX(-1);
+            -webkit-transform: scaleX(-1);
+        }
+        .alert {
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.8;
+            }
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white flex flex-col items-center justify-center min-h-screen p-4">
+
+    <div class="w-full max-w-5xl mx-auto bg-gray-800 rounded-2xl shadow-2xl p-6 border border-gray-700">
+        <h1 class="text-3xl font-bold text-center mb-2 text-cyan-400">Smart Residential Security System</h1>
+        <p class="text-center text-gray-400 mb-6">Real-time Threat Detection Prototype</p>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <!-- Video Feed -->
+            <div class="md:col-span-2 bg-black rounded-lg overflow-hidden relative" style="height: 480px;">
+                <video id="webcam" class="video-container w-full h-full object-cover" autoplay playsinline></video>
+                <canvas id="outputCanvas" class="absolute top-0 left-0 w-full h-full"></canvas>
+                <div id="loading" class="absolute inset-0 flex items-center justify-center bg-black bg-opacity-75">
+                    <p class="text-2xl animate-pulse">Initializing System...</p>
+                </div>
+            </div>
+
+            <!-- Status & Alerts -->
+            <div class="bg-gray-700 rounded-lg p-6 flex flex-col justify-between">
+                <div>
+                    <h2 class="text-xl font-semibold mb-4 border-b border-gray-600 pb-2">System Status</h2>
+                    <div class="space-y-4">
+                        <div>
+                            <p class="text-sm text-gray-400">PERSON DETECTED</p>
+                            <p id="person-status" class="text-lg font-bold text-gray-300">NO</p>
+                        </div>
+                        <div>
+                            <p class="text-sm text-gray-400">CURRENT STATE</p>
+                            <p id="state-status" class="text-lg font-bold text-gray-300">Monitoring...</p>
+                        </div>
+                        <div>
+                            <p class="text-sm text-gray-400">LOITERING TIMER</p>
+                            <p id="loitering-timer" class="text-lg font-bold text-gray-300">0s</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="alert-box" class="mt-6 p-4 rounded-lg bg-gray-800 text-center hidden">
+                    <h3 class="text-2xl font-bold">ALERT!</h3>
+                    <p id="alert-message" class="text-lg mt-1"></p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        const videoElement = document.getElementById('webcam');
+        const canvasElement = document.getElementById('outputCanvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const loadingElement = document.getElementById('loading');
+        
+        const personStatusEl = document.getElementById('person-status');
+        const stateStatusEl = document.getElementById('state-status');
+        const loiteringTimerEl = document.getElementById('loitering-timer');
+        const alertBoxEl = document.getElementById('alert-box');
+        const alertMessageEl = document.getElementById('alert-message');
+
+        let loiteringStartTime = null;
+        const LOITERING_THRESHOLD = 30; // seconds
+
+        let lastY = 0.5;
+        let lastFallTime = 0;
+        const FALL_VELOCITY_THRESHOLD = 0.03;
+        const FALL_TIME_THRESHOLD = 3000; // 3 seconds on ground
+        
+        let isFirstResult = true;
+
+        function onResults(results) {
+            if (isFirstResult) {
+                loadingElement.style.display = 'none';
+                isFirstResult = false;
+            }
+
+            canvasElement.width = videoElement.videoWidth;
+            canvasElement.height = videoElement.videoHeight;
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.translate(canvasElement.width, 0);
+            canvasCtx.scale(-1, 1);
+            
+            // Draw landmarks
+            if (results.poseLandmarks) {
+                window.drawConnectors(canvasCtx, results.poseLandmarks, window.POSE_CONNECTIONS, { color: '#00B8D4', lineWidth: 4 });
+                window.drawLandmarks(canvasCtx, results.poseLandmarks, { color: '#FF007F', lineWidth: 2, radius: 2 });
+                
+                personStatusEl.textContent = 'YES';
+                personStatusEl.classList.remove('text-gray-300');
+                personStatusEl.classList.add('text-green-400');
+                
+                checkActivity(results.poseLandmarks);
+
+            } else {
+                personStatusEl.textContent = 'NO';
+                personStatusEl.classList.add('text-gray-300');
+                personStatusEl.classList.remove('text-green-400');
+                resetStatus();
+            }
+
+            canvasCtx.restore();
+        }
+        
+        function resetStatus() {
+            loiteringStartTime = null;
+            stateStatusEl.textContent = 'Monitoring...';
+            stateStatusEl.classList.remove('text-yellow-400', 'text-red-500');
+            loiteringTimerEl.textContent = '0s';
+            hideAlert();
+        }
+
+        function showAlert(message, type = 'danger') {
+            alertMessageEl.textContent = message;
+            alertBoxEl.classList.remove('hidden');
+            alertBoxEl.classList.remove('bg-yellow-900', 'bg-red-900');
+            if (type === 'warning') {
+                alertBoxEl.classList.add('bg-yellow-900', 'alert');
+            } else {
+                alertBoxEl.classList.add('bg-red-900', 'alert');
+            }
+        }
+
+        function hideAlert() {
+            alertBoxEl.classList.add('hidden');
+            alertBoxEl.classList.remove('alert');
+        }
+
+        function checkActivity(landmarks) {
+            const hip = landmarks[23]; // Left hip
+            const shoulder = landmarks[11]; // Left shoulder
+            
+            if (!hip || !shoulder) return;
+
+            // --- 1. Loitering Detection ---
+            if (loiteringStartTime === null) {
+                loiteringStartTime = Date.now();
+            }
+            const loiteringDuration = Math.floor((Date.now() - loiteringStartTime) / 1000);
+            loiteringTimerEl.textContent = `${loiteringDuration}s`;
+            
+            let isLoitering = loiteringDuration >= LOITERING_THRESHOLD;
+
+            // --- 2. Fall Detection ---
+            const headY = landmarks[0].y;
+            const velocityY = headY - lastY;
+            lastY = headY;
+            
+            const isHorizontal = (Math.abs(hip.y - shoulder.y) < 0.1);
+            let isFalling = false;
+
+            if (velocityY > FALL_VELOCITY_THRESHOLD && isHorizontal) {
+                 if(lastFallTime === 0) lastFallTime = Date.now();
+                 
+                 const timeOnGround = Date.now() - lastFallTime;
+                 if(timeOnGround > FALL_TIME_THRESHOLD){
+                    isFalling = true;
+                 }
+            } else {
+                lastFallTime = 0;
+            }
+            
+            // --- Update UI based on state ---
+            if (isFalling) {
+                stateStatusEl.textContent = 'Fallen';
+                stateStatusEl.classList.add('text-red-500');
+                showAlert('FALL DETECTED!', 'danger');
+            } else if (isLoitering) {
+                stateStatusEl.textContent = 'Loitering';
+                stateStatusEl.classList.add('text-yellow-400');
+                showAlert('Suspicious Loitering Detected!', 'warning');
+            } else {
+                 stateStatusEl.textContent = 'Person Present';
+                 stateStatusEl.classList.remove('text-yellow-400', 'text-red-500');
+                 hideAlert();
+            }
+        }
+
+        const pose = new window.Pose({
+            locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+            },
+        });
+
+        pose.setOptions({
+            modelComplexity: 1,
+            smoothLandmarks: true,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5,
+        });
+
+        pose.onResults(onResults);
+
+        const camera = new window.Camera(videoElement, {
+            onFrame: async () => {
+                await pose.send({image: videoElement});
+            },
+            width: 1280,
+            height: 720
+        });
+
+        camera.start().catch(err => {
+            console.error("Error starting camera: ", err);
+            loadingElement.innerHTML = '<p class="text-2xl text-red-500">Error: Webcam access denied or not found.</p>';
+        });
+
+    </script>
+</body>
+</html>
+
